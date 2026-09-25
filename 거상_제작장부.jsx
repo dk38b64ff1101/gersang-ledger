@@ -57,6 +57,7 @@ const SEED = {
       name: '청혼상류봉',
       path: '장과로',
       fee: 200000000,
+      count: 1,
       sellPrice: 2000000000,
       memo: '',
       open: true,
@@ -340,13 +341,23 @@ export default function App() {
   const prices = data?.prices ?? {};
   const items = data?.items ?? [];
 
-  /* 계산 */
+  /* 계산 — 재료 칸은 1개 기준, 수량만큼 곱한다 */
   const calc = (it) => {
-    const mat = it.mats.reduce((s, m) => s + (prices[m.name] || 0) * (m.qty || 0), 0);
-    const total = mat + (it.fee || 0);
-    const profit = it.sellPrice ? it.sellPrice - total : null;
-    const margin = it.sellPrice ? profit / it.sellPrice : null;
-    return { mat, total, profit, margin };
+    const n = Math.max(1, it.count || 1);
+    const unitMat = it.mats.reduce((s, m) => s + (prices[m.name] || 0) * (m.qty || 0), 0);
+    const unitCost = unitMat + (it.fee || 0);
+    const profitUnit = it.sellPrice ? it.sellPrice - unitCost : null;
+    return {
+      n,
+      unitMat,
+      unitCost,
+      mat: unitMat * n,
+      fee: (it.fee || 0) * n,
+      total: unitCost * n,
+      profitUnit,
+      profit: it.sellPrice ? profitUnit * n : null,
+      margin: it.sellPrice ? profitUnit / it.sellPrice : null,
+    };
   };
 
   const usage = useMemo(() => {
@@ -366,7 +377,7 @@ export default function App() {
           const c = calc(it);
           a.cost += c.total;
           if (it.sellPrice) {
-            a.sell += it.sellPrice;
+            a.sell += it.sellPrice * c.n;
             a.profit += c.profit;
           }
           return a;
@@ -419,7 +430,7 @@ export default function App() {
       ...d,
       items: [
         ...d.items,
-        { id: uid(), name: '', path: '', fee: 0, sellPrice: 0, memo: '', open: true, mats: [{ id: uid(), name: '', qty: 1 }] },
+        { id: uid(), name: '', path: '', fee: 0, count: 1, sellPrice: 0, memo: '', open: true, mats: [{ id: uid(), name: '', qty: 1 }] },
       ],
     }));
 
@@ -473,17 +484,35 @@ export default function App() {
   const toExcel = () => {
     const wb = XLSX.utils.book_new();
 
-    const s1 = [['아이템 이름', '제작 경로', '재료비', '수수료', '총 제작비', '판매가', '순이익', '마진율', '메모']];
+    const s1 = [
+      ['아이템 이름', '제작 경로', '제작 수량', '1개당 원가', '재료비', '수수료', '총 제작비', '판매가(1개)', '순이익', '마진율', '메모'],
+    ];
     items.forEach((it) => {
       const c = calc(it);
-      s1.push([it.name, it.path, c.mat, it.fee || 0, c.total, it.sellPrice || '', c.profit ?? '', c.margin ?? '', it.memo || '']);
+      s1.push([
+        it.name,
+        it.path,
+        c.n,
+        c.unitCost,
+        c.mat,
+        c.fee,
+        c.total,
+        it.sellPrice || '',
+        c.profit ?? '',
+        c.margin ?? '',
+        it.memo || '',
+      ]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s1), '아이템');
 
-    const s2 = [['아이템명', '재료명', '개당 가격', '갯수', '합계']];
+    const s2 = [['아이템명', '재료명', '개당 가격', '1개당 갯수', '제작 수량', '필요 갯수', '합계']];
     items.forEach((it) => {
-      it.mats.forEach((m) => s2.push([it.name, m.name, prices[m.name] || 0, m.qty || 0, (prices[m.name] || 0) * (m.qty || 0)]));
-      if (it.fee) s2.push([it.name, '수수료', it.fee, 1, it.fee]);
+      const c = calc(it);
+      it.mats.forEach((m) => {
+        const need = (m.qty || 0) * c.n;
+        s2.push([it.name, m.name, prices[m.name] || 0, m.qty || 0, c.n, need, (prices[m.name] || 0) * need]);
+      });
+      if (it.fee) s2.push([it.name, '수수료', it.fee, 1, c.n, c.n, c.fee]);
     });
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(s2), '재료');
 
@@ -730,6 +759,22 @@ export default function App() {
                       onChange={(e) => patchItem(it.id, { path: e.target.value })}
                     />
 
+                    <label className="count-box" title="한 번에 몇 개를 만들지">
+                      <span className="times">×</span>
+                      <input
+                        className="cnt"
+                        value={it.count === 0 ? '' : it.count ?? 1}
+                        aria-label="제작 수량"
+                        inputMode="numeric"
+                        placeholder="1"
+                        onChange={(e) => patchItem(it.id, { count: parseAmount(e.target.value) })}
+                        onBlur={(e) => {
+                          if (!parseAmount(e.target.value)) patchItem(it.id, { count: 1 });
+                        }}
+                      />
+                      <span className="unit">개</span>
+                    </label>
+
                     <div className="head-total">
                       <span className="ht-num">{comma(c.total)}</span>
                       <span className="ht-kr">{korean(c.total)}</span>
@@ -787,7 +832,8 @@ export default function App() {
 
                       {it.mats.map((m) => {
                         const unit = prices[m.name] || 0;
-                        const line = unit * (m.qty || 0);
+                        const need = (m.qty || 0) * c.n;
+                        const line = unit * need;
                         const shared = m.name && (usage[m.name] || 0) > 1;
                         const hit = needle && m.name && m.name.toLowerCase().includes(needle);
                         return (
@@ -805,13 +851,16 @@ export default function App() {
 
                             <AmountInput label="개당 가격" value={unit} placeholder="0" onCommit={(v) => setPrice(m.name, v)} />
 
-                            <input
-                              className="amt qty"
-                              value={m.qty ?? ''}
-                              aria-label="갯수"
-                              inputMode="numeric"
-                              onChange={(e) => patchMat(it.id, m.id, { qty: parseAmount(e.target.value) })}
-                            />
+                            <div className="qty-cell">
+                              <input
+                                className="amt qty"
+                                value={m.qty ?? ''}
+                                aria-label="1개당 갯수"
+                                inputMode="numeric"
+                                onChange={(e) => patchMat(it.id, m.id, { qty: parseAmount(e.target.value) })}
+                              />
+                              {c.n > 1 && <span className="need">{comma(need)}개 필요</span>}
+                            </div>
 
                             <div className="line">
                               <span className="line-num">{comma(line)}</span>
@@ -830,27 +879,32 @@ export default function App() {
                       </button>
 
                       <div className="grid fee-row">
-                        <span className="fee-label">수수료</span>
+                        <span className="fee-label">수수료 {c.n > 1 && <em>1회당</em>}</span>
                         <AmountInput label="수수료" value={it.fee} placeholder="0" onCommit={(v) => patchItem(it.id, { fee: v })} />
                         <span />
                         <div className="line">
-                          <span className="line-num">{comma(it.fee)}</span>
-                          <span className="line-kr">{korean(it.fee)}</span>
+                          <span className="line-num">{comma(c.fee)}</span>
+                          <span className="line-kr">{korean(c.fee)}</span>
                         </div>
                         <span />
                       </div>
 
                       <div className="total-row">
-                        <span className="total-label">총 제작비</span>
+                        <span className="total-label">
+                          총 제작비 {c.n > 1 && <em>{comma(c.n)}개분</em>}
+                        </span>
                         <div className="total-num">
                           <span className="big">{comma(c.total)}</span>
-                          <span className="big-kr">{korean(c.total)}</span>
+                          <span className="big-kr">
+                            {korean(c.total)}
+                            {c.n > 1 && ` · 1개당 ${comma(c.unitCost)}`}
+                          </span>
                         </div>
                       </div>
 
                       <div className="sell-row">
                         <label>
-                          <span>판매가</span>
+                          <span>판매가 {c.n > 1 && <em>1개당</em>}</span>
                           <AmountInput
                             label="판매가"
                             value={it.sellPrice}
@@ -867,6 +921,7 @@ export default function App() {
                             </span>
                             <span className="p-meta">
                               {korean(c.profit)} · 마진 {(c.margin * 100).toFixed(1)}%
+                              {c.n > 1 && ` · 1개당 ${c.profitUnit >= 0 ? '+' : ''}${comma(c.profitUnit)}`}
                             </span>
                           </div>
                         ) : (
@@ -1264,6 +1319,30 @@ main{max-width:1000px;margin:0 auto;}
 }
 .path{width:110px;font-size:13px !important;color:var(--ink-soft) !important;}
 
+/* 제작 수량 */
+.count-box{
+  display:inline-flex;align-items:center;gap:3px;flex:none;
+  border:1px solid var(--rule);border-radius:3px;padding:2px 7px;
+}
+.count-box:focus-within{border-color:var(--cobalt);}
+.count-box .times{color:var(--ink-soft);font-size:13px;}
+.count-box .unit{color:var(--ink-soft);font-size:12px;}
+.item .cnt{
+  width:42px;text-align:center;border-bottom:none !important;
+  font-variant-numeric:tabular-nums;font-weight:600;color:var(--cobalt) !important;
+  padding:2px 0 !important;
+}
+.qty-cell{display:flex;flex-direction:column;align-items:stretch;}
+.need{
+  font-size:10px;color:var(--brass);text-align:right;margin-top:1px;
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+.fee-label em, .total-label em, .sell-row label em{
+  font-style:normal;font-size:11px;color:var(--ink-soft);
+  border:1px solid var(--rule);border-radius:2px;padding:0 4px;margin-left:4px;
+}
+.total-label em{border-color:var(--cobalt-mid);color:var(--cobalt-mid);}
+
 .head-total{display:flex;flex-direction:column;align-items:flex-end;margin-left:auto;}
 .ht-num{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;}
 .ht-kr{font-size:11px;color:var(--ink-soft);font-family:'Gowun Batang',serif;}
@@ -1407,6 +1486,8 @@ button:disabled{opacity:.5;cursor:default;}
   .price-row .p-name{grid-area:nm;} .price-row .p-use{grid-area:us;}
   .price-row .amt{grid-area:pr;} .price-row .p-kr{grid-area:kr;text-align:left;}
   .price-row .x{display:none;}
+  .mat-row .qty-cell{grid-area:qt;}
+  .count-box{margin-left:auto;}
   .head-total{margin-left:0;}
   .big{font-size:23px;}
 }
