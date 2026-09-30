@@ -391,14 +391,17 @@ export default function App() {
   const needle = q.trim().toLowerCase();
 
   const shownItems = useMemo(() => {
-    if (!needle) return items.map((it) => ({ it, hitMats: [] }));
-    return items
-      .map((it) => {
-        const hitMats = it.mats.map((m) => m.name).filter((n) => n && n.toLowerCase().includes(needle));
-        const self = [it.name, it.path, it.memo].some((v) => (v || '').toLowerCase().includes(needle));
-        return self || hitMats.length ? { it, hitMats } : null;
-      })
-      .filter(Boolean);
+    const base = !needle
+      ? items.map((it) => ({ it, hitMats: [] }))
+      : items
+          .map((it) => {
+            const hitMats = it.mats.map((m) => m.name).filter((n) => n && n.toLowerCase().includes(needle));
+            const self = [it.name, it.path, it.memo].some((v) => (v || '').toLowerCase().includes(needle));
+            return self || hitMats.length ? { it, hitMats } : null;
+          })
+          .filter(Boolean);
+    /* 즐겨찾기가 위로. 자바스크립트 정렬은 안정적이라 그룹 안 순서는 손댄 그대로 남는다 */
+    return base.slice().sort((a, b) => (b.it.fav ? 1 : 0) - (a.it.fav ? 1 : 0));
   }, [items, needle]);
 
   const shownMats = useMemo(() => {
@@ -445,13 +448,18 @@ export default function App() {
 
   const delItem = (id) => setData((d) => ({ ...d, items: d.items.filter((it) => it.id !== id) }));
 
-  /* 순서 바꾸기 */
+  /* 순서 바꾸기 — 즐겨찾기 그룹 안에서만 움직인다 */
+  const sameGroup = (a, b) => !!a?.fav === !!b?.fav;
+
   const moveItem = (id, dir) =>
     setData((d) => {
-      const i = d.items.findIndex((x) => x.id === id);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= d.items.length) return d;
+      const vis = d.items.slice().sort((a, b) => (b.fav ? 1 : 0) - (a.fav ? 1 : 0));
+      const vi = vis.findIndex((x) => x.id === id);
+      const target = vis[vi + dir];
+      if (vi < 0 || !target || !sameGroup(target, vis[vi])) return d;
       const arr = [...d.items];
+      const i = arr.findIndex((x) => x.id === id);
+      const j = arr.findIndex((x) => x.id === target.id);
       [arr[i], arr[j]] = [arr[j], arr[i]];
       return { ...d, items: arr };
     });
@@ -462,9 +470,22 @@ export default function App() {
       const arr = [...d.items];
       const from = arr.findIndex((x) => x.id === fromId);
       const to = arr.findIndex((x) => x.id === toId);
-      if (from < 0 || to < 0) return d;
+      if (from < 0 || to < 0 || !sameGroup(arr[from], arr[to])) return d;
       const [moved] = arr.splice(from, 1);
       arr.splice(to, 0, moved);
+      return { ...d, items: arr };
+    });
+
+  /* 즐겨찾기 — 켜면 그 그룹의 맨 아래로, 끄면 일반 목록 맨 위로 보낸다 */
+  const toggleFav = (id) =>
+    setData((d) => {
+      const arr = [...d.items];
+      const i = arr.findIndex((x) => x.id === id);
+      if (i < 0) return d;
+      const [it] = arr.splice(i, 1);
+      const next = { ...it, fav: !it.fav };
+      const lastFav = arr.reduce((acc, x, k) => (x.fav ? k : acc), -1);
+      arr.splice(lastFav + 1, 0, next);
       return { ...d, items: arr };
     });
 
@@ -485,11 +506,12 @@ export default function App() {
     const wb = XLSX.utils.book_new();
 
     const s1 = [
-      ['아이템 이름', '제작 경로', '제작 수량', '1개당 원가', '재료비', '수수료', '총 제작비', '판매가(1개)', '순이익', '마진율', '메모'],
+      ['즐겨찾기', '아이템 이름', '제작 경로', '제작 수량', '1개당 원가', '재료비', '수수료', '총 제작비', '판매가(1개)', '순이익', '마진율', '메모'],
     ];
     items.forEach((it) => {
       const c = calc(it);
       s1.push([
+        it.fav ? '★' : '',
         it.name,
         it.path,
         c.n,
@@ -686,19 +708,27 @@ export default function App() {
               const c = calc(it);
               const open = needle ? true : it.open;
               const movable = !needle;
+              const prev = shownItems[idx - 1]?.it;
+              const next = shownItems[idx + 1]?.it;
+              const canUp = movable && prev && !!prev.fav === !!it.fav;
+              const canDown = movable && next && !!next.fav === !!it.fav;
+              const groupBreak = !needle && idx > 0 && prev && !!prev.fav && !it.fav;
+              const dragged = dragId ? items.find((x) => x.id === dragId) : null;
+              const droppable = dragged && dragged.id !== it.id && !!dragged.fav === !!it.fav;
               return (
+                <React.Fragment key={it.id}>
+                  {groupBreak && <div className="group-break" aria-hidden="true" />}
                 <section
-                  className={`item${hitMats.length ? ' matched' : ''}${dragId === it.id ? ' dragging' : ''}${
-                    overId === it.id && dragId !== it.id ? ' over' : ''
-                  }`}
-                  key={it.id}
+                  className={`item${it.fav ? ' fav' : ''}${hitMats.length ? ' matched' : ''}${
+                    dragId === it.id ? ' dragging' : ''
+                  }${overId === it.id && droppable ? ' over' : ''}`}
                   onDragStart={() => setDragId(it.id)}
                   onDragEnd={() => {
                     setDragId(null);
                     setOverId(null);
                   }}
                   onDragOver={(e) => {
-                    if (dragId && dragId !== it.id) {
+                    if (droppable) {
                       e.preventDefault();
                       setOverId(it.id);
                     }
@@ -712,6 +742,23 @@ export default function App() {
                   }}
                 >
                   <div className="item-head">
+                    <button
+                      className={`star${it.fav ? ' on' : ''}`}
+                      aria-pressed={!!it.fav}
+                      aria-label={it.fav ? '즐겨찾기 해제' : '즐겨찾기'}
+                      title={it.fav ? '즐겨찾기 해제' : '즐겨찾기에 넣기'}
+                      onClick={() => toggleFav(it.id)}
+                    >
+                      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                        <path
+                          d="M8 1.6l1.95 3.95 4.35.63-3.15 3.07.74 4.34L8 11.54l-3.89 2.05.74-4.34L1.7 6.18l4.35-.63z"
+                          fill={it.fav ? 'currentColor' : 'none'}
+                          stroke="currentColor"
+                          strokeWidth="1.2"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
                     {movable && (
                       <span
                         className="handle"
@@ -786,7 +833,7 @@ export default function App() {
                           <button
                             className="ghost sm"
                             aria-label="위로 한 칸"
-                            disabled={idx === 0}
+                            disabled={!canUp}
                             onClick={() => moveItem(it.id, -1)}
                           >
                             ↑
@@ -794,7 +841,7 @@ export default function App() {
                           <button
                             className="ghost sm"
                             aria-label="아래로 한 칸"
-                            disabled={idx === shownItems.length - 1}
+                            disabled={!canDown}
                             onClick={() => moveItem(it.id, 1)}
                           >
                             ↓
@@ -939,6 +986,7 @@ export default function App() {
                     </div>
                   )}
                 </section>
+                </React.Fragment>
               );
             })}
 
@@ -1244,6 +1292,17 @@ function Style() {
 mark{background:#F2E3A8;color:var(--ink);border-radius:2px;padding:0 1px;}
 
 .item.matched{border-color:var(--cobalt-mid);}
+
+/* 즐겨찾기 */
+.star{
+  background:none;border:none;padding:3px 1px;line-height:0;flex:none;color:#B4B9AD;
+}
+.star:hover{color:var(--brass);}
+.star.on{color:var(--brass);}
+.item.fav{border-color:#D8C48E;background:#FCFAF2;}
+.group-break{
+  height:1px;background:var(--rule);margin:2px 0 13px;
+}
 
 /* 순서 바꾸기 */
 .handle{
